@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import GalleryGrid from '@/components/GalleryGrid';
+import BackendTestPanel from '@/components/BackendTestPanel';
 import { ClothingItem } from '@/types/clothing';
 
 async function getWardrobeItems(): Promise<ClothingItem[]> {
@@ -54,6 +55,9 @@ export default async function WardrobePage() {
 
       {/* Main content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Backend Integration Test Panel */}
+        <BackendTestPanel />
+
         {/* TODO: Add filter/search bar here when implementing filtering functionality */}
         {/* <div className="mb-6">
           <WardrobeFilters />
