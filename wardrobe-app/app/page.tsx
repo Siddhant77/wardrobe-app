@@ -8,12 +8,20 @@ export default function Home() {
         <p className="text-lg text-gray-600 mb-8">
           Organize and manage your wardrobe collection
         </p>
-        <Link
-          href="/wardrobe"
-          className="inline-block bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-colors"
-        >
-          View Gallery
-        </Link>
+        <div className="flex gap-6 justify-center">
+          <Link
+            href="/wardrobe"
+            className="inline-block bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            View Gallery
+          </Link>
+          <Link
+            href="/outfit"
+            className="inline-block bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            Recommend Outfit
+          </Link>
+        </div>
       </div>
     </main>
   );

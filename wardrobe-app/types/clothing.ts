@@ -1,8 +1,3 @@
-/**
- * TypeScript interfaces for wardrobe management system
- * Future-ready for API integration and metadata management
- */
-
 export interface ClothingItem {
   id: string;
   filename: string;
@@ -12,6 +7,10 @@ export interface ClothingItem {
   category?: 'tops' | 'bottoms' | 'dresses' | 'outerwear' | 'shoes' | 'accessories';
   color?: string[];
   formality?: 'casual' | 'business-casual' | 'formal' | 'athletic';
+
+  // Binary label metadata (decoded to strings in modal)
+  weatherLabel?: number;
+  formalityLabel?: number;
 
   // Additional metadata placeholders
   season?: 'spring' | 'summer' | 'fall' | 'winter' | 'all-season';

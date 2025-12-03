@@ -1,37 +1,52 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import GalleryGrid from '@/components/GalleryGrid';
-import BackendTestPanel from '@/components/BackendTestPanel';
 import { ClothingItem } from '@/types/clothing';
 
 async function getWardrobeItems(): Promise<ClothingItem[]> {
-  const wardrobeDir = path.join(process.cwd(), 'public', 'wardrobe');
+  const metadataPath = path.join(process.cwd(), 'public', 'metadata.csv');
 
   try {
-    // Check if wardrobe directory exists
-    await fs.access(wardrobeDir);
-    const files = await fs.readdir(wardrobeDir);
+    // Read metadata.csv
+    const csvContent = await fs.readFile(metadataPath, 'utf-8');
+    const lines = csvContent.trim().split('\n');
 
-    // Filter for image files
-    const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
-    const imageFiles = files.filter((file) => {
-      const ext = path.extname(file).toLowerCase();
-      return imageExtensions.includes(ext);
+    if (lines.length < 2) {
+      console.warn('Metadata.csv is empty or missing headers');
+      return [];
+    }
+
+    // Parse CSV header
+    const headers = lines[0].split(',');
+    const idIndex = headers.indexOf('id');
+    const imageNameIndex = headers.indexOf('image_name');
+    const imagePathIndex = headers.indexOf('image_path');
+    const categoryIndex = headers.indexOf('item_category');
+    const weatherLabelIndex = headers.indexOf('weather_label');
+    const formalityLabelIndex = headers.indexOf('formality_label');
+
+    if (idIndex === -1 || imagePathIndex === -1) {
+      console.warn('Required columns (id, image_path) not found in metadata.csv');
+      return [];
+    }
+
+    // Parse CSV data rows
+    const items: ClothingItem[] = lines.slice(1).map((line) => {
+      const values = line.split(',');
+      return {
+        id: values[idIndex]?.trim() || '',
+        filename: values[imageNameIndex]?.trim() || '',
+        imagePath: `/wardrobe/${values[imagePathIndex]?.trim() || ''}`,
+        category: values[categoryIndex]?.trim() || 'Unknown',
+        weatherLabel: weatherLabelIndex !== -1 ? parseInt(values[weatherLabelIndex]?.trim() || '0', 10) : undefined,
+        formalityLabel: formalityLabelIndex !== -1 ? parseInt(values[formalityLabelIndex]?.trim() || '0', 10) : undefined,
+      };
     });
-
-    // Map to ClothingItem objects
-    const items: ClothingItem[] = imageFiles.map((file) => ({
-      id: file, // Use filename as ID for now
-      filename: file,
-      imagePath: `/wardrobe/${file}`,
-      // TODO: When API integration is added, fetch metadata from database here
-      // Example: category, color, formality, season, etc.
-    }));
 
     return items;
   } catch (error) {
-    // Directory doesn't exist or is empty
-    console.warn('Wardrobe directory not found or empty:', error);
+    // Metadata.csv doesn't exist or can't be read
+    console.warn('Could not read metadata.csv:', error);
     return [];
   }
 }
@@ -55,9 +70,6 @@ export default async function WardrobePage() {
 
       {/* Main content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Backend Integration Test Panel */}
-        <BackendTestPanel />
-
         {/* TODO: Add filter/search bar here when implementing filtering functionality */}
         {/* <div className="mb-6">
           <WardrobeFilters />
