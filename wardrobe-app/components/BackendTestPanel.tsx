@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { APIClothingItem, ScoreRequest, ScoreResponse } from '@/types/api';
+import { logDebug, logError } from '@/lib/logger';
 
 const API_BASE_URL = 'http://localhost:8000';
 
@@ -31,7 +32,7 @@ export default function BackendTestPanel() {
       }
 
       const items: APIClothingItem[] = await response.json();
-      console.log('Full response from GET /items:', items);
+      logDebug('Full response from GET /items:', items);
 
       if (items.length === 0) {
         alert('No items found in the backend!');
@@ -53,7 +54,7 @@ export default function BackendTestPanel() {
       );
 
     } catch (error) {
-      console.error('Error fetching items:', error);
+      logError('Error fetching items:', error);
       setErrorMessage('Backend not connected. Make sure FastAPI is running on port 8000.');
       alert('Error: Backend not connected. Please start the FastAPI server.');
     } finally {
@@ -87,7 +88,7 @@ export default function BackendTestPanel() {
       }
 
       const result: ScoreResponse = await response.json();
-      console.log('Full response from POST /score:', result);
+      logDebug('Full response from POST /score:', result);
 
       // Display the score in alert
       // TODO: Replace with a modal or notification component
@@ -99,7 +100,7 @@ export default function BackendTestPanel() {
       );
 
     } catch (error) {
-      console.error('Error scoring outfit:', error);
+      logError('Error scoring outfit:', error);
       setErrorMessage('Backend not connected. Make sure FastAPI is running on port 8000.');
       alert('Error: Backend not connected. Please start the FastAPI server.');
     } finally {

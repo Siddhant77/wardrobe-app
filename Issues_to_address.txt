@@ -1,0 +1,119 @@
+ISSUES TO ADDRESS
+=================
+
+1. ATOMIC OPERATIONS / TRANSACTION SAFETY
+   Location: backend/main.py (upload_image, delete_item endpoints)
+   Description: Upload and delete operations are not atomic. If one step fails partway through,
+   files can be left in an inconsistent state.
+
+   Upload flow: image saved → embedding saved → metadata appended
+   - If embedding fails: image exists but no metadata entry
+   - If metadata fails: image + embedding exist but not tracked
+
+   Delete flow: image deleted → embeddings deleted → metadata row removed
+   - If vit_embeddings deletion fails: fashion_embeddings still deleted
+   - If metadata deletion fails: item partially deleted
+
+   Solution: Implement atomic transactions using temporary files + rename pattern
+   - Validate all operations first
+   - Prepare changes in memory/temp files
+   - Commit atomically (file rename is atomic on most filesystems)
+   - Rollback on any failure
+
+2. EMBEDDING ARRAY INDEX CONSISTENCY
+   Location: backend/embeddings.py (delete_item_embeddings function)
+   Description: When deleting an item by removing a row from embedding arrays, all subsequent
+   items' indices shift. This breaks the 1:1 mapping between item_id and array index.
+
+   Example: Delete item 5 from 10-item array
+   - vit_embeddings becomes 9 rows
+   - Item 6 now at index 4 (was 5), but item_id is still 6
+   - Recommendations using embeddings will use wrong vectors
+
+   Current behavior: np.delete(embeddings, item_id - 1, axis=0) shifts all rows up
+
+   Solutions:
+   a) Don't delete rows - instead set them to zero vectors (wastes space but maintains indices)
+   b) Track deleted items in metadata.csv with a "deleted" column
+   c) Periodically rebuild embedding arrays with contiguous IDs (requires DB migration)
+   d) Switch to database backend before production
+
+3. ERROR HANDLING IN DELETE OPERATIONS
+   Location: backend/embeddings.py (delete_item_embeddings function)
+   Description: Errors in individual embedding deletions are caught and logged but don't stop
+   the operation. This can leave embeddings partially deleted without clear error propagation.
+
+   Current: try/except around each file deletion, outer except re-raises
+   Problem: If vit_embeddings.npy deletion fails, fashion_embeddings.npy still gets deleted
+
+   Should: Either both succeed or both fail together
+
+4. IMAGE UPLOAD PATH HANDLING
+   Location: backend/main.py (upload_image endpoint)
+   Description: Relative path '../wardrobe-app/public/wardrobe/new_data' assumes execution
+   from backend/ directory. This breaks if backend is run from different location.
+
+   Current: Path("../wardrobe-app/public/wardrobe/new_data")
+   Better: Use absolute paths from project root or environment variables
+
+5. EMBEDDING GENERATION TIMEOUT/RESOURCE LIMITS
+   Location: backend/embeddings.py (generate_clip_embedding, generate_fashion_embedding)
+   Description: Model loading and inference can take significant time, blocking HTTP requests.
+   Large image uploads might timeout or consume excessive memory.
+
+   Considerations:
+   - CLIP model loads on first request (slow ~30-60s depending on device)
+   - FashionCLIP model also lazy-loaded on first request
+   - No timeout protection on embedding generation
+   - No concurrent request limiting
+
+6. METADATA.CSV FORMAT CHANGES
+   Location: Multiple files
+   Description: If metadata.csv structure changes (new columns, reordering), embedding
+   array sizes must match. Currently tight coupling between CSV and .npy files.
+
+   Example: If new column added to CSV, embedding arrays don't automatically resize
+
+7. CATEGORY AUTO-DETECTION
+   Location: backend/main.py (preprocess_image function)
+   Description: Category is currently hard-coded to "unknown" on upload. Should infer from
+   image content using CLIP text embeddings (clothing type: tops, bottoms, shoes, etc.)
+
+   Current: category = "unknown"  # User must manually set via /update-metadata
+   Better: Use CLIP to classify clothing type on upload
+
+8. DUPLICATE IMAGE HANDLING
+   Location: backend/main.py (upload_image endpoint)
+   Description: No check for duplicate images. Same clothing item can be uploaded multiple
+   times with different filenames, creating redundant embeddings.
+
+   Potential solution: Hash image content or use perceptual hashing to detect duplicates
+
+9. MISSING FASHION_EMBEDDINGS IN PREPROCESSING
+   Location: backend/main.py (preprocess_image function)
+   Description: FashionCLIP embeddings are not generated during upload preprocessing, only
+   CLIP ViT-B/32 embeddings. Fashion embeddings are used by recommendation system but not
+   created for new uploads.
+
+   Should also call: generate_fashion_embedding(file_path, item_id=next_id, embeddings_dir=...)
+
+   STATUS: FIXED - FashionCLIP now generated on upload
+
+10. LACK OF BACKEND CACHING & REPEATED API CALLS
+    Location: wardrobe-app/components/ImageModal.tsx (ImageModal component)
+    Description: Frontend makes repeated API calls to /update-metadata and /delete-item without
+    verifying success. After user clicks "Save Changes" or "Burn", the request might fail silently
+    or partially succeed, leaving metadata out of sync with embeddings.
+
+    Current behavior:
+    - Click "Save" → API call made → UI shows success message immediately
+    - If API fails partway through, frontend shows success but backend is inconsistent
+    - No retry mechanism or error recovery
+
+    Before deploying to AWS/database:
+    - Implement backend caching layer for outfit recommendations
+    - Avoid repeated calls to recommendation API on page load
+    - Add request deduplication/memoization
+    - Consider: Should embeddings be cached in memory after first load?
+
+    Related to Issue #1 (atomicity) - frontend optimism assumes backend succeeds

@@ -82,7 +82,7 @@ const items = await fetch('/api/wardrobe').then(res => res.json());
 
 #### Metadata Support
 The `ClothingItem` interface includes placeholders for:
-- `category`: tops, bottoms, dresses, outerwear, shoes, accessories
+- `category`: tops, bottoms, outerwear, shoes, accessories
 - `color`: Array of color tags
 - `formality`: casual, business-casual, formal, athletic
 - `season`: spring, summer, fall, winter, all-season

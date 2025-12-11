@@ -5,6 +5,7 @@ import { useState, useEffect } from 'react';
 import OutfitDisplay from '@/components/OutfitDisplay';
 import { OutfitRecommendation, RecommendRequest } from '@/types/api';
 import { ClothingItem } from '@/types/clothing';
+import { logDebug, logError } from '@/lib/logger';
 
 const API_BASE_URL = 'http://localhost:8000';
 
@@ -27,14 +28,14 @@ export default function OutfitPage() {
         const response = await fetch('/api/wardrobe');
         if (response.ok) {
           const items: ClothingItem[] = await response.json();
-          console.log('Loaded wardrobeItems:', items);
-          console.log('First item category:', items[0]?.category);
+          logDebug('Loaded wardrobeItems:', items);
+          logDebug('First item category:', items[0]?.category);
           setWardrobeItems(items);
         } else {
-          console.error('API returned non-ok status:', response.status);
+          logError('API returned non-ok status:', response.status.toString());
         }
       } catch (err) {
-        console.error('Failed to load wardrobe items:', err);
+        logError('Failed to load wardrobe items:', err);
       }
     };
     loadWardrobeItems();
@@ -67,7 +68,7 @@ export default function OutfitPage() {
       setCurrentOutfitIndex(0);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch outfit recommendation');
-      console.error('Error fetching outfit:', err);
+      logError('Error fetching outfit:', err);
     } finally {
       setLoading(false);
     }
@@ -98,10 +99,10 @@ export default function OutfitPage() {
       }
 
       const data = await response.json();
-      console.log('Vote recorded:', data);
+      logDebug('Vote recorded:', data);
       alert(data.message);
     } catch (err) {
-      console.error('Error recording vote:', err);
+      logError('Error recording vote:', err);
       alert('Failed to record vote');
     }
   };

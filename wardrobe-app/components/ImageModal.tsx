@@ -3,11 +3,14 @@
 import Image from 'next/image';
 import { useEffect, useState } from 'react';
 import { ClothingItem } from '@/types/clothing';
+import { logInfo, logError, logDebug } from '@/lib/logger';
 
 interface ImageModalProps {
   item: ClothingItem | null;
   isOpen: boolean;
   onClose: () => void;
+  onItemUpdated?: (updatedItem: ClothingItem) => void;
+  onItemDeleted?: (itemId: string) => void;
 }
 
 // Decode binary labels to strings
@@ -37,7 +40,7 @@ function decodeBinaryLabels(value: number | undefined, labelMap: Record<number, 
   return labels;
 }
 
-export default function ImageModal({ item, isOpen, onClose }: ImageModalProps) {
+export default function ImageModal({ item, isOpen, onClose, onItemUpdated, onItemDeleted }: ImageModalProps) {
   const [selectedCategory, setSelectedCategory] = useState(item?.category || '');
   const [selectedWeatherLabels, setSelectedWeatherLabels] = useState<string[]>(
     item?.weatherLabel ? decodeBinaryLabels(item.weatherLabel, WEATHER_LABELS) : []
@@ -45,11 +48,14 @@ export default function ImageModal({ item, isOpen, onClose }: ImageModalProps) {
   const [selectedFormalityLabels, setSelectedFormalityLabels] = useState<string[]>(
     item?.formalityLabel ? decodeBinaryLabels(item.formalityLabel, FORMALITY_LABELS) : []
   );
+  const [isSaving, setIsSaving] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   const categories = [
     'tops',
     'bottoms',
-    'dresses',
     'outerwear',
     'shoes',
     'accessories',
@@ -68,6 +74,65 @@ export default function ImageModal({ item, isOpen, onClose }: ImageModalProps) {
     setSelectedFormalityLabels((prev: string[]) =>
       prev.includes(label) ? prev.filter((l: string) => l !== label) : [...prev, label]
     );
+  };
+
+  const handleSaveMetadata = async () => {
+    if (!item) return;
+
+    setIsSaving(true);
+    setSaveMessage(null);
+
+    try {
+      const response = await fetch('http://localhost:8000/update-metadata', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          item_id: parseInt(item.id, 10),
+          category: selectedCategory || undefined,
+          weather_labels: selectedWeatherLabels.length > 0 ? selectedWeatherLabels : undefined,
+          formality_labels: selectedFormalityLabels.length > 0 ? selectedFormalityLabels : undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      setSaveMessage('Changes saved successfully!');
+      logDebug('Metadata updated:', data);
+
+      if (onItemUpdated && item) {
+        const updatedItem: ClothingItem = {
+          ...item,
+          category: selectedCategory as any,
+          weatherLabel: selectedWeatherLabels.length > 0
+            ? Object.entries({ Hot: 0b0001, Cold: 0b0010, Rainy: 0b0100 }).reduce((acc, [label, bit]) => {
+                if (selectedWeatherLabels.includes(label)) acc |= bit as number;
+                return acc;
+              }, 0)
+            : 0,
+          formalityLabel: selectedFormalityLabels.length > 0
+            ? Object.entries({ Casual: 0b0001, Formal: 0b0010, Sports: 0b0100, Party: 0b1000 }).reduce((acc, [label, bit]) => {
+                if (selectedFormalityLabels.includes(label)) acc |= bit as number;
+                return acc;
+              }, 0)
+            : 0,
+        };
+        onItemUpdated(updatedItem);
+      }
+
+      setTimeout(() => {
+        setSaveMessage(null);
+      }, 3000);
+    } catch (err) {
+      setSaveMessage('Failed to save changes');
+      logError('Error saving metadata:', err);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   // Close modal on ESC key press
@@ -101,9 +166,45 @@ export default function ImageModal({ item, isOpen, onClose }: ImageModalProps) {
     }
   }, [item]);
 
-  // Print all selected values whenever they change
+  const handleDeleteItem = async () => {
+    if (!item) return;
+
+    setIsDeleting(true);
+    setSaveMessage(null);
+
+    try {
+      const response = await fetch(`http://localhost:8000/delete-item/${item.id}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.statusText}`);
+      }
+
+      setSaveMessage('Item deleted successfully!');
+      logDebug('Item deleted:', item.id);
+
+      setTimeout(() => {
+        setShowDeleteConfirm(false);
+        if (onItemDeleted) {
+          onItemDeleted(item.id);
+        }
+        onClose();
+      }, 1000);
+    } catch (err) {
+      setSaveMessage('Failed to delete item');
+      logError('Error deleting item:', err);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Log all selected values whenever they change
   useEffect(() => {
-    console.log('All selected values:', {
+    logDebug('All selected values:', {
       selectedCategory,
       selectedWeatherLabels,
       selectedFormalityLabels,
@@ -249,6 +350,58 @@ export default function ImageModal({ item, isOpen, onClose }: ImageModalProps) {
                 )}
               </div>
             ) : null}
+
+            {/* Save Button and Message */}
+            <div className="mt-8 pt-6 border-t border-gray-200">
+              <div className="flex gap-3">
+                <button
+                  onClick={handleSaveMetadata}
+                  disabled={isSaving || isDeleting}
+                  className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isSaving ? 'Saving...' : 'Save Changes'}
+                </button>
+                <button
+                  onClick={() => setShowDeleteConfirm(true)}
+                  disabled={isDeleting || isSaving}
+                  className="flex-1 px-6 py-3 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isDeleting ? 'Burning...' : 'Burn'}
+                </button>
+              </div>
+              {saveMessage && (
+                <p className={`mt-3 text-sm font-medium text-center ${
+                  saveMessage.includes('successfully') ? 'text-green-600' : 'text-red-600'
+                }`}>
+                  {saveMessage}
+                </p>
+              )}
+            </div>
+
+            {/* Delete Confirmation Dialog */}
+            {showDeleteConfirm && (
+              <div className="mt-6 p-4 border-2 border-red-400 bg-red-50 rounded-lg">
+                <p className="text-red-800 font-medium mb-4">
+                  Are you sure you want to burn this item? This action cannot be undone.
+                </p>
+                <div className="flex gap-3">
+                  <button
+                    onClick={handleDeleteItem}
+                    disabled={isDeleting}
+                    className="flex-1 px-4 py-2 bg-red-600 text-white rounded font-medium hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isDeleting ? 'Burning...' : 'Yes, Burn It'}
+                  </button>
+                  <button
+                    onClick={() => setShowDeleteConfirm(false)}
+                    disabled={isDeleting}
+                    className="flex-1 px-4 py-2 bg-gray-300 text-gray-800 rounded font-medium hover:bg-gray-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

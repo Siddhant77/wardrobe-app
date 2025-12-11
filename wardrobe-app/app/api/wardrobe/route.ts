@@ -35,7 +35,7 @@ export async function GET(request: NextRequest) {
         id: values[idIndex]?.trim() || '',
         filename: values[imageNameIndex]?.trim() || '',
         imagePath: `/wardrobe/${values[imagePathIndex]?.trim() || ''}`,
-        category: values[categoryIndex]?.trim() || 'Unknown',
+        category: (values[categoryIndex]?.trim() || 'Unknown').toLowerCase() as any,
         weatherLabel: weatherLabelIndex !== -1 ? parseInt(values[weatherLabelIndex]?.trim() || '0', 10) : undefined,
         formalityLabel: formalityLabelIndex !== -1 ? parseInt(values[formalityLabelIndex]?.trim() || '0', 10) : undefined,
       };

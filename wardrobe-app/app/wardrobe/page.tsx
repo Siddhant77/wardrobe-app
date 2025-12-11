@@ -1,6 +1,8 @@
 import { promises as fs } from 'fs';
 import path from 'path';
+import Link from 'next/link';
 import GalleryGrid from '@/components/GalleryGrid';
+import ImageUpload from '@/components/ImageUpload';
 import { ClothingItem } from '@/types/clothing';
 
 async function getWardrobeItems(): Promise<ClothingItem[]> {
@@ -37,7 +39,7 @@ async function getWardrobeItems(): Promise<ClothingItem[]> {
         id: values[idIndex]?.trim() || '',
         filename: values[imageNameIndex]?.trim() || '',
         imagePath: `/wardrobe/${values[imagePathIndex]?.trim() || ''}`,
-        category: values[categoryIndex]?.trim() || 'Unknown',
+        category: (values[categoryIndex]?.trim() || 'Unknown').toLowerCase() as any,
         weatherLabel: weatherLabelIndex !== -1 ? parseInt(values[weatherLabelIndex]?.trim() || '0', 10) : undefined,
         formalityLabel: formalityLabelIndex !== -1 ? parseInt(values[formalityLabelIndex]?.trim() || '0', 10) : undefined,
       };
@@ -61,6 +63,12 @@ export default async function WardrobePage() {
       {/* Header */}
       <header className="bg-white shadow-sm border-b border-gray-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          <Link
+            href="/"
+            className="inline-block mb-4 text-blue-600 hover:text-blue-700 transition-colors"
+          >
+            ← Back to Home
+          </Link>
           <h1 className="text-3xl font-bold text-gray-900">My Wardrobe</h1>
           <p className="mt-2 text-sm text-gray-600">
             {items.length} {items.length === 1 ? 'item' : 'items'} in your collection
@@ -76,6 +84,14 @@ export default async function WardrobePage() {
         </div> */}
 
         <GalleryGrid items={items} />
+
+        {/* Upload section */}
+        <div className="mt-16 pt-8 border-t border-gray-200">
+          <h2 className="text-2xl font-bold text-gray-900 mb-6">Upload New Item</h2>
+          <div className="max-w-2xl">
+            <ImageUpload />
+          </div>
+        </div>
       </main>
     </div>
   );

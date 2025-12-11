@@ -35,4 +35,3 @@ next-env.d.ts
 # wardrobe images (optional - remove if you want to commit them)
 wardrobe-app/public/wardrobe/*.jpg
 wardrobe-app/public/wardrobe/*.HEIC
-

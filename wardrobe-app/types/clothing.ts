@@ -4,7 +4,7 @@ export interface ClothingItem {
   imagePath: string;
 
   // Placeholder props for future implementation
-  category?: 'tops' | 'bottoms' | 'dresses' | 'outerwear' | 'shoes' | 'accessories';
+  category?: 'tops' | 'bottoms' | 'outerwear' | 'shoes' | 'accessories';
   color?: string[];
   formality?: 'casual' | 'business-casual' | 'formal' | 'athletic';
 

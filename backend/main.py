@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -7,6 +7,14 @@ import csv
 from pathlib import Path
 import numpy as np
 from itertools import product
+import shutil
+from logger import logger, log_info, log_warning, log_error, log_debug, get_log_level, set_log_level, LogLevel
+from embeddings import (
+    generate_clip_embedding, generate_fashion_embedding,
+    classify_weather_labels, classify_formality_labels,
+    delete_item_embeddings, load_category_centroids, classify_category,
+    save_item_embeddings
+)
 
 app = FastAPI(
     title="Wardrobe Recommendation API",
@@ -22,6 +30,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ========================
+# Module-level caching
+# ========================
+_cached_centroids = None
 
 # ========================
 # Pydantic Models
@@ -63,6 +76,36 @@ class VoteResponse(BaseModel):
     success: bool
     message: str
     updated_items: List[int]
+
+class UpdateMetadataRequest(BaseModel):
+    item_id: int = Field(..., description="ID of the item to update")
+    category: Optional[str] = Field(None, description="New category")
+    weather_labels: Optional[List[str]] = Field(None, description="List of weather labels")
+    formality_labels: Optional[List[str]] = Field(None, description="List of formality labels")
+
+class UpdateMetadataResponse(BaseModel):
+    success: bool
+    message: str
+    item_id: int
+
+class UploadImageResponse(BaseModel):
+    success: bool
+    message: str
+    item_id: int
+    filename: str
+
+class DeleteItemResponse(BaseModel):
+    success: bool
+    message: str
+    item_id: int
+
+class LogLevelRequest(BaseModel):
+    level: str = Field(..., description="Log level: CRITICAL, ERROR, WARNING, INFO, DEBUG")
+
+class LogLevelResponse(BaseModel):
+    success: bool
+    message: str
+    current_level: str
 
 # ========================
 # Dummy Database
@@ -136,7 +179,7 @@ def get_items():
     # TODO: Replace with actual database query
     # Example: items = db.query(ClothingItem).all()
 
-    print("Querying database for items...")
+    log_debug("Querying database for items...")
 
     return DUMMY_ITEMS
 
@@ -148,7 +191,7 @@ def get_item(item_id: int):
     # TODO: Replace with actual database query
     # Example: item = db.query(ClothingItem).filter(ClothingItem.id == item_id).first()
 
-    print(f"Fetching item {item_id} from database...")
+    log_debug(f"Fetching item {item_id} from database...")
 
     item = next((item for item in DUMMY_ITEMS if item["id"] == item_id), None)
 
@@ -208,6 +251,140 @@ def get_items_for_category(items, max_count=20):
     return prioritized[:max_count]
 
 
+def encode_weather_labels(labels: List[str]) -> int:
+    """
+    Encode weather label strings to binary representation.
+    Hot=0b0001, Cold=0b0010, Rainy=0b0100
+    """
+    weather_map = {
+        'Hot': 0b0001,
+        'Cold': 0b0010,
+        'Rainy': 0b0100,
+    }
+    result = 0
+    for label in labels:
+        if label in weather_map:
+            result |= weather_map[label]
+    return result
+
+
+def encode_formality_labels(labels: List[str]) -> int:
+    """
+    Encode formality label strings to binary representation.
+    Casual=0b0001, Formal=0b0010, Sports=0b0100, Party=0b1000
+    """
+    formality_map = {
+        'Casual': 0b0001,
+        'Formal': 0b0010,
+        'Sports': 0b0100,
+        'Party': 0b1000,
+    }
+    result = 0
+    for label in labels:
+        if label in formality_map:
+            result |= formality_map[label]
+    return result
+
+
+def preprocess_image(file_path: str, item_id: int = None) -> dict:
+    """
+    Preprocess an image to extract metadata using CLIP and FashionCLIP embeddings.
+    Generates embeddings but does not save them (save happens after metadata.csv is updated).
+    Uses centroid-based classification to infer category from FashionCLIP embedding.
+
+    Args:
+        file_path: Path to the image file
+        item_id: ID of the item. Used to include embeddings in response.
+
+    Returns:
+        dict with category, weather_label, formality_label, clip_embedding, fashion_embedding
+    """
+    try:
+        log_debug(f"Preprocessing image: {file_path}")
+
+        # Generate CLIP embedding (used for weather/formality classification)
+        clip_embedding = generate_clip_embedding(file_path)
+
+        # Generate FashionCLIP embedding (used for category classification and outfit recommendations)
+        fashion_embedding = None
+        if item_id is not None:
+            try:
+                fashion_embedding = generate_fashion_embedding(file_path)
+                log_debug(f"Generated FashionCLIP embedding for item {item_id}")
+            except Exception as e:
+                log_error(f"Failed to generate FashionCLIP embedding for {file_path}", exception=e)
+                # Continue despite FashionCLIP failure - CLIP embedding is sufficient for labels
+
+        # Classify weather and formality labels (using CLIP embedding)
+        weather_label = classify_weather_labels(clip_embedding)
+        formality_label = classify_formality_labels(clip_embedding)
+
+        # Classify category using FashionCLIP embedding and pre-computed centroids
+        category = "unknown"
+        if fashion_embedding is not None:
+            centroids = get_cached_centroids()
+            if centroids:
+                category = classify_category(fashion_embedding, centroids, threshold=0.25)
+                log_debug(f"Classified category as '{category}' using FashionCLIP centroid matching")
+            else:
+                log_warning(f"Category centroids not available; defaulting to 'unknown'")
+
+        result = {
+            "metadata": {
+                "category": category,
+                "weather_label": int(weather_label),
+                "formality_label": int(formality_label),
+            },
+            "clip_embedding": clip_embedding,
+            "fashion_embedding": fashion_embedding,
+        }
+
+        log_debug(f"Preprocessing complete for {file_path}")
+        return result
+
+    except Exception as e:
+        log_error(f"Error preprocessing image", exception=e)
+        # Return default metadata on error
+        return {
+            "metadata": {
+                "category": "unknown",
+                "weather_label": 0,
+                "formality_label": 0,
+            },
+            "clip_embedding": None,
+            "fashion_embedding": None,
+        }
+
+
+def get_cached_centroids() -> dict:
+    """
+    Get cached category centroids, loading from disk if not already cached.
+    Centroids are loaded once and reused for subsequent classification requests.
+
+    Returns:
+        Dictionary mapping category names to centroid embeddings.
+        Returns empty dict if centroids file doesn't exist.
+    """
+    global _cached_centroids
+    if _cached_centroids is None:
+        embeddings_dir = Path("../wardrobe-app/public")
+        _cached_centroids = load_category_centroids(embeddings_dir=str(embeddings_dir))
+        if _cached_centroids:
+            log_debug(f"Loaded {len(_cached_centroids)} category centroids into cache")
+    return _cached_centroids
+
+
+def delete_embeddings(item_id: int) -> None:
+    """
+    Delete item embeddings from fashion_embeddings.npy and vit_embeddings.npy.
+
+    Args:
+        item_id: ID of the item to remove embeddings for
+    """
+    embeddings_dir = Path("../wardrobe-app/public")
+    delete_item_embeddings(item_id, embeddings_dir=str(embeddings_dir))
+
+
 def load_embeddings():
     """
     Load FashionCLIP embeddings from fashion_embeddings.npy file.
@@ -216,14 +393,14 @@ def load_embeddings():
     embeddings_path = Path("../wardrobe-app/public/fashion_embeddings.npy")
 
     if not embeddings_path.exists():
-        print("Warning: fashion_embeddings.npy not found. Outfit scoring will not use embeddings.")
+        log_warning("fashion_embeddings.npy not found. Outfit scoring will not use embeddings.")
         return None
 
     try:
         embeddings = np.load(embeddings_path)
         return embeddings
     except Exception as e:
-        print(f"Error loading embeddings: {e}")
+        log_error(f"Error loading embeddings", exception=e)
         return None
 
 
@@ -409,8 +586,8 @@ def recommend_outfit(request: RecommendRequest):
     Cold/rainy weather also includes outerwear.
     Generates all possible outfit combinations and returns the best-scored one.
     """
-    print(f"Calling outfit generation model with context: {request.weather}, {request.occasion}")
-    print(f"Selected items: {request.selected_items}")
+    log_debug(f"Calling outfit generation model with context: {request.weather}, {request.occasion}")
+    log_debug(f"Selected items: {request.selected_items}")
 
     # Load items from metadata and embeddings
     items_by_category = load_metadata()
@@ -442,11 +619,11 @@ def recommend_outfit(request: RecommendRequest):
         score = calculate_outfit_score(outfit_combo, embeddings)
         all_scores.append(score)
 
-    # Print scores to terminal
+    # Log scores
     avg_score = np.mean(all_scores)
     max_score = np.max(all_scores)
     min_score = np.min(all_scores)
-    print(f"Outfit Scores - Best: {max_score:.4f}, Avg: {avg_score:.4f}, Min: {min_score:.4f}, Max: {max_score:.4f}")
+    log_info(f"Outfit Scores - Best: {max_score:.4f}, Avg: {avg_score:.4f}, Min: {min_score:.4f}, Max: {max_score:.4f}")
 
     # Select top-5 diverse outfits
     diverse_outfits = select_diverse_outfits(outfit_combinations, all_scores, top_k=5)
@@ -468,9 +645,9 @@ def recommend_outfit(request: RecommendRequest):
 
         recommended_outfits.append(SingleOutfit(items=outfit_items, score=round(score, 4)))
 
-    # Print top-5 scores
+    # Log top-5 scores
     top_scores = [score for _, score in diverse_outfits]
-    print(f"Top-5 Diverse Outfit Scores: {[round(s, 4) for s in top_scores]}")
+    log_info(f"Top-5 Diverse Outfit Scores: {[round(s, 4) for s in top_scores]}")
 
     reasoning = f"Based on {request.weather} weather and {request.occasion} occasion, " \
                 f"selected top-5 diverse outfits with scores: {[round(s, 4) for s in top_scores]}"
@@ -488,7 +665,7 @@ def score_outfit(request: ScoreRequest):
     # TODO: Replace with actual ML model call
     # Example: score = compatibility_model.score(item_ids)
 
-    print(f"Calling compatibility scoring model for items: {request.item_ids}")
+    log_debug(f"Calling compatibility scoring model for items: {request.item_ids}")
 
     # Dummy logic: generate random score between 0.0 and 1.0
     # In reality, this would be based on color theory, style rules, etc.
@@ -550,8 +727,283 @@ def vote_outfit(request: VoteRequest):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error updating votes: {e}")
+        log_error(f"Error updating votes", exception=e)
         raise HTTPException(status_code=500, detail=f"Error updating votes: {str(e)}")
+
+@app.post("/update-metadata", response_model=UpdateMetadataResponse)
+def update_metadata(request: UpdateMetadataRequest):
+    """
+    Update item metadata (category, weather labels, formality labels) in metadata.csv.
+    Only provided fields are updated.
+    """
+    metadata_path = Path("../wardrobe-app/public/metadata.csv")
+
+    if not metadata_path.exists():
+        raise HTTPException(status_code=500, detail="Metadata file not found")
+
+    try:
+        # Read the CSV file
+        rows = []
+
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            headers = reader.fieldnames
+
+            if not headers:
+                raise HTTPException(status_code=400, detail="Metadata.csv is empty or invalid")
+
+            for row in reader:
+                rows.append(row)
+
+        # Find and update the item
+        item_found = False
+        for row in rows:
+            if int(row['id']) == request.item_id:
+                item_found = True
+
+                # Update category if provided
+                if request.category:
+                    row['item_category'] = request.category
+
+                # Update weather labels if provided
+                if request.weather_labels is not None:
+                    weather_binary = encode_weather_labels(request.weather_labels)
+                    row['weather_label'] = str(weather_binary)
+
+                # Update formality labels if provided
+                if request.formality_labels is not None:
+                    formality_binary = encode_formality_labels(request.formality_labels)
+                    row['formality_label'] = str(formality_binary)
+
+                break
+
+        if not item_found:
+            raise HTTPException(status_code=404, detail=f"Item {request.item_id} not found")
+
+        # Write back to CSV
+        with open(metadata_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        return UpdateMetadataResponse(
+            success=True,
+            message=f"Item {request.item_id} metadata updated successfully",
+            item_id=request.item_id
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error updating metadata", exception=e)
+        raise HTTPException(status_code=500, detail=f"Error updating metadata: {str(e)}")
+
+@app.post("/upload-image", response_model=UploadImageResponse)
+def upload_image(image: UploadFile = File(...)):
+    """
+    Upload a new wardrobe image and add it to metadata.csv.
+    Calls preprocess_image() to extract metadata.
+    """
+    metadata_path = Path("../wardrobe-app/public/metadata.csv")
+    wardrobe_dir = Path("../wardrobe-app/public/wardrobe/new_data")
+
+    if not metadata_path.exists():
+        raise HTTPException(status_code=500, detail="Metadata file not found")
+
+    if not wardrobe_dir.exists():
+        wardrobe_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Validate file type
+        if not image.content_type or not image.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="File must be an image")
+
+        # Save image to new_data directory
+        filename = image.filename
+        if not filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        file_path = wardrobe_dir / filename
+        with open(file_path, "wb") as f:
+            shutil.copyfileobj(image.file, f)
+
+        # Read CSV to get next ID
+        rows = []
+        next_id = 1
+
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            headers = reader.fieldnames
+
+            if not headers:
+                raise HTTPException(status_code=400, detail="Metadata.csv is empty or invalid")
+
+            for row in reader:
+                rows.append(row)
+                try:
+                    item_id = int(row['id'])
+                    if item_id >= next_id:
+                        next_id = item_id + 1
+                except (ValueError, KeyError):
+                    pass
+
+        # Preprocess image (returns metadata and embeddings separately)
+        preprocess_result = preprocess_image(str(file_path), item_id=next_id)
+        metadata = preprocess_result['metadata']
+        clip_embedding = preprocess_result['clip_embedding']
+        fashion_embedding = preprocess_result['fashion_embedding']
+
+        # Create new row
+        new_row = {
+            'id': str(next_id),
+            'image_name': filename,
+            'image_path': f"new_data/{filename}",
+            'item_category': metadata['category'],
+            'weather_label': str(metadata['weather_label']),
+            'formality_label': str(metadata['formality_label']),
+            'vote': '0',
+        }
+
+        rows.append(new_row)
+
+        # Write back to CSV (must happen before saving embeddings)
+        with open(metadata_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        # Save embeddings after metadata.csv is updated
+        embeddings_dir = Path("../wardrobe-app/public")
+        if clip_embedding is not None and fashion_embedding is not None:
+            try:
+                save_item_embeddings(
+                    next_id,
+                    clip_embedding,
+                    fashion_embedding,
+                    embeddings_dir=str(embeddings_dir)
+                )
+                log_debug(f"Successfully saved embeddings for item {next_id}")
+            except Exception as e:
+                log_error(f"Failed to save embeddings for item {next_id}", exception=e)
+                raise HTTPException(status_code=500, detail=f"Failed to save embeddings: {str(e)}")
+
+        return UploadImageResponse(
+            success=True,
+            message=f"Image uploaded successfully",
+            item_id=next_id,
+            filename=filename
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error uploading image", exception=e)
+        raise HTTPException(status_code=500, detail=f"Error uploading image: {str(e)}")
+
+@app.get("/config/log-level", response_model=LogLevelResponse)
+def get_log_level_endpoint():
+    """
+    Get the current log level setting.
+    """
+    current_level = get_log_level()
+    return LogLevelResponse(
+        success=True,
+        message=f"Current log level is {current_level.value}",
+        current_level=current_level.value
+    )
+
+
+@app.post("/config/log-level", response_model=LogLevelResponse)
+def set_log_level_endpoint(request: LogLevelRequest):
+    """
+    Set the log level at runtime. Changes take effect immediately.
+
+    Valid levels: CRITICAL, ERROR, WARNING, INFO, DEBUG
+    """
+    try:
+        level = LogLevel(request.level.upper())
+        set_log_level(level)
+        return LogLevelResponse(
+            success=True,
+            message=f"Log level changed to {level.value}",
+            current_level=level.value
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid log level. Must be one of: CRITICAL, ERROR, WARNING, INFO, DEBUG"
+        )
+
+
+@app.delete("/delete-item/{item_id}", response_model=DeleteItemResponse)
+def delete_item(item_id: int):
+    """
+    Delete a wardrobe item completely:
+    1. Remove the image file from disk
+    2. Delete the row from metadata.csv
+    3. Remove embeddings from .npy files (stub)
+    """
+    metadata_path = Path("../wardrobe-app/public/metadata.csv")
+    wardrobe_dir = Path("../wardrobe-app/public/wardrobe")
+
+    if not metadata_path.exists():
+        raise HTTPException(status_code=500, detail="Metadata file not found")
+
+    try:
+        # Read CSV to find the image path and remove the row
+        rows = []
+        image_path = None
+        item_found = False
+
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            headers = reader.fieldnames
+
+            if not headers:
+                raise HTTPException(status_code=400, detail="Metadata.csv is empty or invalid")
+
+            for row in reader:
+                if int(row['id']) == item_id:
+                    item_found = True
+                    image_path = row['image_path']
+                    # Don't add this row to the list (effectively deleting it)
+                else:
+                    rows.append(row)
+
+        if not item_found:
+            raise HTTPException(status_code=404, detail=f"Item {item_id} not found")
+
+        # Delete the image file from disk
+        if image_path:
+            file_to_delete = wardrobe_dir / image_path
+            if file_to_delete.exists():
+                file_to_delete.unlink()
+                log_debug(f"Deleted image file: {file_to_delete}")
+            else:
+                log_warning(f"Image file not found at {file_to_delete}")
+
+        # Delete embeddings (stub for now)
+        delete_embeddings(item_id)
+
+        # Write updated CSV back (without the deleted row)
+        with open(metadata_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        log_info(f"Item {item_id} deleted successfully")
+
+        return DeleteItemResponse(
+            success=True,
+            message=f"Item {item_id} deleted successfully",
+            item_id=item_id
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error deleting item", exception=e)
+        raise HTTPException(status_code=500, detail=f"Error deleting item: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
