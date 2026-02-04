@@ -1,3 +1,26 @@
+# FastAPI & Web Server
 fastapi>=0.104.0
-uvicorn>=0.24.0
+uvicorn[standard]>=0.24.0
 pydantic>=2.5.0
+pydantic-settings>=2.0.0
+python-multipart>=0.0.6
+
+# Database
+psycopg2-binary>=2.9.9
+pgvector>=0.2.4
+sqlalchemy>=2.0.23
+
+# Cache & Queue
+redis>=5.0.1
+
+# Storage (S3/MinIO/R2)
+boto3>=1.34.0
+botocore>=1.34.0
+
+# ML & Image Processing
+torch>=2.1.0
+torchvision>=0.16.0
+numpy>=1.24.0
+Pillow>=10.1.0
+git+https://github.com/openai/CLIP.git
+fashion-clip==0.2.2

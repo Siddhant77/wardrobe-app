@@ -117,3 +117,39 @@ ISSUES TO ADDRESS
     - Consider: Should embeddings be cached in memory after first load?
 
     Related to Issue #1 (atomicity) - frontend optimism assumes backend succeeds
+
+11. USER PRIVACY - PUBLIC IMAGE BUCKET
+    Location: backend/storage.py, docker-compose.yml (MinIO configuration)
+    Description: Images are currently stored in a publicly accessible bucket without authentication.
+    This is acceptable for development but NOT production-ready for private user data (wardrobe photos).
+
+    Current behavior:
+    - MinIO bucket has public read access
+    - Image URLs are plain HTTP URLs (http://localhost:9000/closetgpt-images/...)
+    - Anyone with the URL can view images
+    - No user isolation or access control
+
+    Security concern:
+    - Wardrobe photos are private user data
+    - Should not be publicly accessible to anyone with URL
+    - Multi-user deployment would leak users' private clothing photos
+
+    Solution Options:
+
+    OPTION 1: Presigned URLs (Recommended)
+    - Generate temporary signed URLs with expiration (e.g., 1 hour)
+    - Backend generates signed URL on-demand when frontend requests image
+    - S3/MinIO/R2 validates signature before serving image
+    - Pros: Standard pattern, good security/performance balance, minimal backend load
+    - Cons: URLs expire (need refresh logic), slightly more complex frontend
+    - Implementation: Use boto3's generate_presigned_url() method
+
+    OPTION 2: Backend Proxy
+    - All image requests go through backend API (e.g., GET /images/{item_id})
+    - Backend verifies user owns the item, then streams image
+    - Pros: Maximum control, fine-grained permissions, audit trail
+    - Cons: Higher backend load, more complex, added latency
+    - Implementation: New endpoint that checks user_id match then proxies storage
+
+    Recommendation: Use presigned URLs (Option 1) for production deployment.
+    Priority: Must be addressed before Phase 6 (multi-user authentication)

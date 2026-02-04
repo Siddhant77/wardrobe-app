@@ -1,0 +1,147 @@
+# version: '3.8'
+
+services:
+  # PostgreSQL with pgvector extension
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: closetgpt-postgres
+    environment:
+      POSTGRES_DB: closetgpt
+      POSTGRES_USER: closetgpt
+      POSTGRES_PASSWORD: closetgpt_dev_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U closetgpt"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - closetgpt-network
+
+  # Redis for caching and job queue
+  redis:
+    image: redis:7-alpine
+    container_name: closetgpt-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - closetgpt-network
+
+  # MinIO - S3-compatible local storage
+  minio:
+    image: minio/minio:latest
+    container_name: closetgpt-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"  # API
+      - "9001:9001"  # Console
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - closetgpt-network
+
+  # MinIO Client - Create bucket on startup
+  minio-client:
+    image: minio/mc:latest
+    container_name: closetgpt-minio-client
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb local/closetgpt-images --ignore-existing;
+      mc policy set public local/closetgpt-images;
+      exit 0;
+      "
+    networks:
+      - closetgpt-network
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: closetgpt-backend
+    environment:
+      ENV: dev
+      DATABASE_URL: postgresql://closetgpt:closetgpt_dev_password@postgres:5432/closetgpt
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_PROVIDER: minio
+      MINIO_ENDPOINT: minio:9000  # Internal Docker network
+      MINIO_PUBLIC_ENDPOINT: localhost:9000  # Browser-accessible URL
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: closetgpt-images
+      MINIO_USE_SSL: "false"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./wardrobe-app:/wardrobe-app:ro  # Read-only access for migration
+      - backend_models:/app/models  # Persist ML models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-client:
+        condition: service_completed_successfully
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - closetgpt-network
+    restart: unless-stopped
+
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ./wardrobe-app
+      dockerfile: Dockerfile
+      target: development
+    container_name: closetgpt-frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./wardrobe-app:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    command: npm run dev
+    networks:
+      - closetgpt-network
+    restart: unless-stopped
+
+networks:
+  closetgpt-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  backend_models:

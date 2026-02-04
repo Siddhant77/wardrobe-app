@@ -16,6 +16,7 @@
 # misc
 .DS_Store
 *.pem
+CLAUDE.local.md
 
 # debug
 npm-debug.log*
@@ -24,9 +25,37 @@ yarn-error.log*
 
 # local env files
 .env*.local
+.env.dev
+.env.prod
+*.env
 
 # vercel
 .vercel
+
+# Docker
+docker-compose.override.yml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ML Models (large files)
+backend/models/*.pth
+backend/models/*.pt
+backend/models/*.onnx
+
+# Database
+*.db
+*.sqlite3
 
 # typescript
 *.tsbuildinfo

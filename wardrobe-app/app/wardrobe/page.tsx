@@ -1,62 +1,85 @@
-import { promises as fs } from 'fs';
-import path from 'path';
+'use client';
+
 import Link from 'next/link';
+import { useState, useEffect } from 'react';
 import GalleryGrid from '@/components/GalleryGrid';
 import ImageUpload from '@/components/ImageUpload';
 import { ClothingItem } from '@/types/clothing';
 
-async function getWardrobeItems(): Promise<ClothingItem[]> {
-  const metadataPath = path.join(process.cwd(), 'public', 'metadata.csv');
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-  try {
-    // Read metadata.csv
-    const csvContent = await fs.readFile(metadataPath, 'utf-8');
-    const lines = csvContent.trim().split('\n');
+export default function WardrobePage() {
+  const [items, setItems] = useState<ClothingItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-    if (lines.length < 2) {
-      console.warn('Metadata.csv is empty or missing headers');
-      return [];
-    }
+  useEffect(() => {
+    const fetchItems = async () => {
+      try {
+        setLoading(true);
+        // Call backend API directly
+        const response = await fetch(`${API_BASE_URL}/items`);
 
-    // Parse CSV header
-    const headers = lines[0].split(',');
-    const idIndex = headers.indexOf('id');
-    const imageNameIndex = headers.indexOf('image_name');
-    const imagePathIndex = headers.indexOf('image_path');
-    const categoryIndex = headers.indexOf('item_category');
-    const weatherLabelIndex = headers.indexOf('weather_label');
-    const formalityLabelIndex = headers.indexOf('formality_label');
+        if (!response.ok) {
+          throw new Error(`API error: ${response.status} ${response.statusText}`);
+        }
 
-    if (idIndex === -1 || imagePathIndex === -1) {
-      console.warn('Required columns (id, image_path) not found in metadata.csv');
-      return [];
-    }
+        const data = await response.json();
 
-    // Parse CSV data rows
-    const items: ClothingItem[] = lines.slice(1).map((line) => {
-      const values = line.split(',');
-      return {
-        id: values[idIndex]?.trim() || '',
-        filename: values[imageNameIndex]?.trim() || '',
-        imagePath: `/wardrobe/${values[imagePathIndex]?.trim() || ''}`,
-        category: (values[categoryIndex]?.trim() || 'Unknown').toLowerCase() as any,
-        weatherLabel: weatherLabelIndex !== -1 ? parseInt(values[weatherLabelIndex]?.trim() || '0', 10) : undefined,
-        formalityLabel: formalityLabelIndex !== -1 ? parseInt(values[formalityLabelIndex]?.trim() || '0', 10) : undefined,
-      };
-    });
+        // Transform backend response to match ClothingItem type
+        const transformedItems: ClothingItem[] = data.map((item: any) => ({
+          id: item.id.toString(),
+          filename: item.image_name,
+          imagePath: item.image_url,
+          category: item.category.toLowerCase(),
+          weatherLabel: item.weather_label,
+          formalityLabel: item.formality_label,
+        }));
 
-    return items;
-  } catch (error) {
-    // Metadata.csv doesn't exist or can't be read
-    console.warn('Could not read metadata.csv:', error);
-    return [];
+        setItems(transformedItems);
+      } catch (err) {
+        console.error('Failed to load wardrobe items:', err);
+        setError(err instanceof Error ? err.message : 'Failed to load items');
+        setItems([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchItems();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <p className="text-gray-500">Loading wardrobe items...</p>
+      </div>
+    );
   }
-}
 
-export default async function WardrobePage() {
-  // TODO: Replace with API call when backend is ready
-  // const items = await fetch('/api/wardrobe').then(res => res.json());
-  const items = await getWardrobeItems();
+  if (error) {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <header className="bg-white shadow-sm border-b border-gray-200">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+            <Link
+              href="/"
+              className="inline-block mb-4 text-blue-600 hover:text-blue-700 transition-colors"
+            >
+              ← Back to Home
+            </Link>
+            <h1 className="text-3xl font-bold text-gray-900">My Wardrobe</h1>
+          </div>
+        </header>
+        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <div className="text-center">
+            <p className="text-red-500">Error: {error}</p>
+            <p className="text-gray-600 mt-2">Make sure the backend is running at {API_BASE_URL}</p>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -78,12 +101,14 @@ export default async function WardrobePage() {
 
       {/* Main content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* TODO: Add filter/search bar here when implementing filtering functionality */}
-        {/* <div className="mb-6">
-          <WardrobeFilters />
-        </div> */}
-
-        <GalleryGrid items={items} />
+        {items.length === 0 ? (
+          <div className="text-center py-12">
+            <p className="text-gray-500 mb-4">No items in your wardrobe yet.</p>
+            <p className="text-sm text-gray-400">Upload images below or run the migration script to import existing data.</p>
+          </div>
+        ) : (
+          <GalleryGrid items={items} />
+        )}
 
         {/* Upload section */}
         <div className="mt-16 pt-8 border-t border-gray-200">
@@ -96,6 +121,3 @@ export default async function WardrobePage() {
     </div>
   );
 }
-
-// Enable dynamic rendering to read from filesystem
-export const dynamic = 'force-dynamic';

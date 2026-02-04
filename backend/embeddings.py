@@ -57,7 +57,7 @@ def _get_fashion_clip_model() -> FashionCLIP:
     global _fashion_clip_model
     if _fashion_clip_model is None:
         try:
-            _fashion_clip_model = FashionCLIP(model_name='fashion-clip')
+            _fashion_clip_model = FashionCLIP(model_name='fashion-clip', token=None)
             log_debug("Loaded FashionCLIP model")
         except Exception as e:
             log_error("Failed to load FashionCLIP model", exception=e)

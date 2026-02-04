@@ -3,33 +3,55 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional
 import random
-import csv
 from pathlib import Path
 import numpy as np
 from itertools import product
-import shutil
+import tempfile
+
 from logger import logger, log_info, log_warning, log_error, log_debug, get_log_level, set_log_level, LogLevel
 from embeddings import (
     generate_clip_embedding, generate_fashion_embedding,
     classify_weather_labels, classify_formality_labels,
-    delete_item_embeddings, load_category_centroids, classify_category,
-    save_item_embeddings
+    load_category_centroids, classify_category
 )
+from config import get_settings
+from storage import get_storage_client
+import db
 
 app = FastAPI(
     title="Wardrobe Recommendation API",
-    description="Dummy API for wardrobe recommendation system",
-    version="1.0.0"
+    description="API for wardrobe recommendation system with PostgreSQL and vector similarity",
+    version="2.0.0"
 )
+
+# Initialize settings
+settings = get_settings()
 
 # CORS middleware for frontend integration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Next.js default port
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Startup and shutdown events
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database connection pool on startup."""
+    log_info("Starting up closetGPT API...")
+    db.init_db_pool()
+    log_info(f"Environment: {settings.env}")
+    log_info(f"Storage Provider: {settings.storage_provider}")
+    log_info("Database connection pool initialized")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close database connection pool on shutdown."""
+    log_info("Shutting down closetGPT API...")
+    db.close_db_pool()
+    log_info("Database connection pool closed")
 
 # ========================
 # Module-level caching
@@ -108,52 +130,13 @@ class LogLevelResponse(BaseModel):
     current_level: str
 
 # ========================
-# Dummy Database
+# Helper: Health Check
 # ========================
 
-# TODO: Replace with real database queries (PostgreSQL, MongoDB, etc.)
-DUMMY_ITEMS = [
-    {
-        "id": 1,
-        "category": "tops",
-        "color": "white",
-        "formality": "business-casual",
-        "name": "White Oxford Shirt",
-        "image_path": "/wardrobe/shirt_1.jpg"
-    },
-    {
-        "id": 2,
-        "category": "bottoms",
-        "color": "navy",
-        "formality": "business-casual",
-        "name": "Navy Chinos",
-        "image_path": "/wardrobe/pants_1.jpg"
-    },
-    {
-        "id": 3,
-        "category": "outerwear",
-        "color": "black",
-        "formality": "formal",
-        "name": "Black Blazer",
-        "image_path": "/wardrobe/blazer_1.jpg"
-    },
-    {
-        "id": 4,
-        "category": "shoes",
-        "color": "brown",
-        "formality": "casual",
-        "name": "Brown Loafers",
-        "image_path": "/wardrobe/shoes_1.jpg"
-    },
-    {
-        "id": 5,
-        "category": "tops",
-        "color": "gray",
-        "formality": "casual",
-        "name": "Gray Hoodie",
-        "image_path": "/wardrobe/hoodie_1.jpg"
-    }
-]
+@app.get("/health")
+def health_check():
+    """Health check endpoint for container orchestration."""
+    return {"status": "healthy", "version": "2.0.0"}
 
 # ========================
 # API Endpoints
@@ -171,67 +154,72 @@ def root():
         ]
     }
 
-@app.get("/items", response_model=List[ClothingItem])
+@app.get("/items")
 def get_items():
     """
-    Get all wardrobe items from database
+    Get all wardrobe items from PostgreSQL database.
+    Returns items with image URLs from storage (MinIO/R2).
     """
-    # TODO: Replace with actual database query
-    # Example: items = db.query(ClothingItem).all()
-
     log_debug("Querying database for items...")
 
-    return DUMMY_ITEMS
+    try:
+        items = db.get_all_items()
+        log_debug(f"Retrieved {len(items)} items from database")
+        return items
+    except Exception as e:
+        log_error(f"Error fetching items from database", exception=e)
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-@app.get("/items/{item_id}", response_model=ClothingItem)
+@app.get("/items/{item_id}")
 def get_item(item_id: int):
     """
-    Get a specific wardrobe item by ID
+    Get a specific wardrobe item by ID from PostgreSQL.
     """
-    # TODO: Replace with actual database query
-    # Example: item = db.query(ClothingItem).filter(ClothingItem.id == item_id).first()
-
     log_debug(f"Fetching item {item_id} from database...")
 
-    item = next((item for item in DUMMY_ITEMS if item["id"] == item_id), None)
+    try:
+        item = db.get_item_by_id(item_id)
 
-    if not item:
-        raise HTTPException(status_code=404, detail=f"Item {item_id} not found")
+        if not item:
+            raise HTTPException(status_code=404, detail=f"Item {item_id} not found")
 
-    return item
+        return item
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f"Error fetching item {item_id}", exception=e)
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 def load_metadata():
     """
-    Load and parse metadata.csv to get item information with labels
+    Load item information with labels from PostgreSQL database.
+    Returns dictionary mapping category to list of items.
     """
-    metadata_path = Path("../wardrobe-app/public/metadata.csv")
+    try:
+        all_items = db.get_all_items()
 
-    if not metadata_path.exists():
-        raise HTTPException(status_code=500, detail="Metadata file not found")
+        items_by_category = {}
 
-    items_by_category = {}
-
-    with open(metadata_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            item_id = int(row['id'])
-            category = row['item_category'].lower()
-            weather_label = int(row['weather_label'])
-            formality_label = int(row['formality_label'])
+        for item in all_items:
+            category = item['category'].lower()
 
             if category not in items_by_category:
                 items_by_category[category] = []
 
             items_by_category[category].append({
-                'id': item_id,
+                'id': item['id'],
                 'category': category,
-                'image_path': f"/wardrobe/{row['image_path']}",
-                'name': row['image_name'],
-                'weather_label': weather_label,
-                'formality_label': formality_label,
+                'image_path': item['image_url'],  # Full URL from storage
+                'name': item['image_name'],
+                'weather_label': item['weather_label'],
+                'formality_label': item['formality_label'],
             })
 
-    return items_by_category
+        return items_by_category
+
+    except Exception as e:
+        log_error(f"Error loading metadata from database", exception=e)
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
 def get_items_for_category(items, max_count=20):
@@ -374,33 +362,30 @@ def get_cached_centroids() -> dict:
     return _cached_centroids
 
 
-def delete_embeddings(item_id: int) -> None:
-    """
-    Delete item embeddings from fashion_embeddings.npy and vit_embeddings.npy.
-
-    Args:
-        item_id: ID of the item to remove embeddings for
-    """
-    embeddings_dir = Path("../wardrobe-app/public")
-    delete_item_embeddings(item_id, embeddings_dir=str(embeddings_dir))
-
-
 def load_embeddings():
     """
-    Load FashionCLIP embeddings from fashion_embeddings.npy file.
-    Returns a dictionary mapping item_id to embedding vector.
+    Load FashionCLIP embeddings from PostgreSQL database.
+    Returns numpy array of embeddings indexed by (item_id - 1).
     """
-    embeddings_path = Path("../wardrobe-app/public/fashion_embeddings.npy")
-
-    if not embeddings_path.exists():
-        log_warning("fashion_embeddings.npy not found. Outfit scoring will not use embeddings.")
-        return None
-
     try:
-        embeddings = np.load(embeddings_path)
-        return embeddings
+        item_ids, embeddings = db.get_all_fashion_embeddings()
+
+        if len(item_ids) == 0:
+            log_warning("No embeddings found in database. Outfit scoring will use default scores.")
+            return None
+
+        # Create array indexed by item_id (1-indexed, so array is 0-indexed)
+        max_id = max(item_ids)
+        embeddings_array = np.zeros((max_id, embeddings.shape[1]))
+
+        for i, item_id in enumerate(item_ids):
+            embeddings_array[item_id - 1] = embeddings[i]
+
+        log_debug(f"Loaded {len(item_ids)} embeddings from database")
+        return embeddings_array
+
     except Exception as e:
-        log_error(f"Error loading embeddings", exception=e)
+        log_error(f"Error loading embeddings from database", exception=e)
         return None
 
 
@@ -681,43 +666,17 @@ def vote_outfit(request: VoteRequest):
     """
     Record user feedback on an outfit by voting on items.
     +1 for like (positive feedback), -1 for dislike (negative feedback)
-    Updates the vote column in metadata.csv for each item in the outfit.
+    Updates the vote_score in PostgreSQL for each item in the outfit.
     """
-    metadata_path = Path("../wardrobe-app/public/metadata.csv")
-
-    if not metadata_path.exists():
-        raise HTTPException(status_code=500, detail="Metadata file not found")
-
     try:
-        # Read the CSV file
-        rows = []
+        updated_count = db.update_item_votes(request.item_ids, request.vote)
 
-        with open(metadata_path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            headers = reader.fieldnames
-
-            if 'vote' not in headers:
-                raise HTTPException(status_code=400, detail="Vote column not found in metadata.csv")
-
-            for row in reader:
-                rows.append(row)
-
-        # Update votes for items in the outfit
-        updated_count = 0
-        for row in rows:
-            item_id = int(row['id'])
-            if item_id in request.item_ids:
-                current_vote = int(row.get('vote', 0))
-                row['vote'] = str(current_vote + request.vote)
-                updated_count += 1
-
-        # Write back to CSV
-        with open(metadata_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=headers)
-            writer.writeheader()
-            writer.writerows(rows)
+        if updated_count == 0:
+            raise HTTPException(status_code=404, detail="No items found to update")
 
         vote_type = "liked" if request.vote > 0 else "disliked"
+        log_info(f"Outfit {vote_type}: updated {updated_count} items")
+
         return VoteResponse(
             success=True,
             message=f"Outfit {vote_type} successfully. Updated {updated_count} items.",
@@ -728,63 +687,36 @@ def vote_outfit(request: VoteRequest):
         raise
     except Exception as e:
         log_error(f"Error updating votes", exception=e)
-        raise HTTPException(status_code=500, detail=f"Error updating votes: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.post("/update-metadata", response_model=UpdateMetadataResponse)
 def update_metadata(request: UpdateMetadataRequest):
     """
-    Update item metadata (category, weather labels, formality labels) in metadata.csv.
+    Update item metadata (category, weather labels, formality labels) in PostgreSQL.
     Only provided fields are updated.
     """
-    metadata_path = Path("../wardrobe-app/public/metadata.csv")
-
-    if not metadata_path.exists():
-        raise HTTPException(status_code=500, detail="Metadata file not found")
-
     try:
-        # Read the CSV file
-        rows = []
+        # Encode label lists to binary if provided
+        weather_binary = None
+        if request.weather_labels is not None:
+            weather_binary = encode_weather_labels(request.weather_labels)
 
-        with open(metadata_path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            headers = reader.fieldnames
+        formality_binary = None
+        if request.formality_labels is not None:
+            formality_binary = encode_formality_labels(request.formality_labels)
 
-            if not headers:
-                raise HTTPException(status_code=400, detail="Metadata.csv is empty or invalid")
+        # Update in database
+        success = db.update_item_metadata(
+            item_id=request.item_id,
+            category=request.category,
+            weather_label=weather_binary,
+            formality_label=formality_binary
+        )
 
-            for row in reader:
-                rows.append(row)
-
-        # Find and update the item
-        item_found = False
-        for row in rows:
-            if int(row['id']) == request.item_id:
-                item_found = True
-
-                # Update category if provided
-                if request.category:
-                    row['item_category'] = request.category
-
-                # Update weather labels if provided
-                if request.weather_labels is not None:
-                    weather_binary = encode_weather_labels(request.weather_labels)
-                    row['weather_label'] = str(weather_binary)
-
-                # Update formality labels if provided
-                if request.formality_labels is not None:
-                    formality_binary = encode_formality_labels(request.formality_labels)
-                    row['formality_label'] = str(formality_binary)
-
-                break
-
-        if not item_found:
+        if not success:
             raise HTTPException(status_code=404, detail=f"Item {request.item_id} not found")
 
-        # Write back to CSV
-        with open(metadata_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=headers)
-            writer.writeheader()
-            writer.writerows(rows)
+        log_info(f"Item {request.item_id} metadata updated successfully")
 
         return UpdateMetadataResponse(
             success=True,
@@ -796,103 +728,88 @@ def update_metadata(request: UpdateMetadataRequest):
         raise
     except Exception as e:
         log_error(f"Error updating metadata", exception=e)
-        raise HTTPException(status_code=500, detail=f"Error updating metadata: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.post("/upload-image", response_model=UploadImageResponse)
 def upload_image(image: UploadFile = File(...)):
     """
-    Upload a new wardrobe image and add it to metadata.csv.
-    Calls preprocess_image() to extract metadata.
+    Upload a new wardrobe image:
+    1. Upload image to storage (MinIO/R2)
+    2. Generate embeddings with CLIP/FashionCLIP
+    3. Insert metadata and embeddings into PostgreSQL
     """
-    metadata_path = Path("../wardrobe-app/public/metadata.csv")
-    wardrobe_dir = Path("../wardrobe-app/public/wardrobe/new_data")
-
-    if not metadata_path.exists():
-        raise HTTPException(status_code=500, detail="Metadata file not found")
-
-    if not wardrobe_dir.exists():
-        wardrobe_dir.mkdir(parents=True, exist_ok=True)
-
     try:
         # Validate file type
         if not image.content_type or not image.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="File must be an image")
 
-        # Save image to new_data directory
         filename = image.filename
         if not filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
-        file_path = wardrobe_dir / filename
-        with open(file_path, "wb") as f:
-            shutil.copyfileobj(image.file, f)
+        # Read image data
+        image_data = image.file.read()
 
-        # Read CSV to get next ID
-        rows = []
-        next_id = 1
+        # Save to temporary file for processing
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as tmp_file:
+            tmp_file.write(image_data)
+            tmp_file_path = tmp_file.name
 
-        with open(metadata_path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            headers = reader.fieldnames
+        try:
+            # Preprocess image to extract metadata and embeddings
+            # Pass None for item_id since we don't have it yet
+            preprocess_result = preprocess_image(tmp_file_path, item_id=1)
+            metadata = preprocess_result['metadata']
+            clip_embedding = preprocess_result['clip_embedding']
+            fashion_embedding = preprocess_result['fashion_embedding']
 
-            if not headers:
-                raise HTTPException(status_code=400, detail="Metadata.csv is empty or invalid")
+            if clip_embedding is None or fashion_embedding is None:
+                raise HTTPException(status_code=500, detail="Failed to generate embeddings")
 
-            for row in reader:
-                rows.append(row)
-                try:
-                    item_id = int(row['id'])
-                    if item_id >= next_id:
-                        next_id = item_id + 1
-                except (ValueError, KeyError):
-                    pass
+            # Upload image to storage
+            storage_client = get_storage_client()
+            object_key = f"uploads/{filename}"
+            image_url_internal, image_url_public = storage_client.upload_file(
+                image_data,
+                object_key,
+                content_type=image.content_type
+            )
 
-        # Preprocess image (returns metadata and embeddings separately)
-        preprocess_result = preprocess_image(str(file_path), item_id=next_id)
-        metadata = preprocess_result['metadata']
-        clip_embedding = preprocess_result['clip_embedding']
-        fashion_embedding = preprocess_result['fashion_embedding']
+            log_debug(f"Uploaded image to storage: {image_url_public}")
 
-        # Create new row
-        new_row = {
-            'id': str(next_id),
-            'image_name': filename,
-            'image_path': f"new_data/{filename}",
-            'item_category': metadata['category'],
-            'weather_label': str(metadata['weather_label']),
-            'formality_label': str(metadata['formality_label']),
-            'vote': '0',
-        }
+            # Insert into database
+            item_id = db.insert_clothing_item(
+                image_name=filename,
+                image_url_internal=image_url_internal,
+                image_url_public=image_url_public,
+                category=metadata['category'],
+                weather_label=metadata['weather_label'],
+                formality_label=metadata['formality_label']
+            )
 
-        rows.append(new_row)
+            # Insert embeddings
+            db.insert_item_embeddings(
+                item_id=item_id,
+                clip_embedding=clip_embedding,
+                fashion_embedding=fashion_embedding
+            )
 
-        # Write back to CSV (must happen before saving embeddings)
-        with open(metadata_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=headers)
-            writer.writeheader()
-            writer.writerows(rows)
+            log_info(f"Successfully uploaded item {item_id}: {filename}")
 
-        # Save embeddings after metadata.csv is updated
-        embeddings_dir = Path("../wardrobe-app/public")
-        if clip_embedding is not None and fashion_embedding is not None:
+            return UploadImageResponse(
+                success=True,
+                message=f"Image uploaded successfully",
+                item_id=item_id,
+                filename=filename
+            )
+
+        finally:
+            # Clean up temporary file
             try:
-                save_item_embeddings(
-                    next_id,
-                    clip_embedding,
-                    fashion_embedding,
-                    embeddings_dir=str(embeddings_dir)
-                )
-                log_debug(f"Successfully saved embeddings for item {next_id}")
-            except Exception as e:
-                log_error(f"Failed to save embeddings for item {next_id}", exception=e)
-                raise HTTPException(status_code=500, detail=f"Failed to save embeddings: {str(e)}")
-
-        return UploadImageResponse(
-            success=True,
-            message=f"Image uploaded successfully",
-            item_id=next_id,
-            filename=filename
-        )
+                Path(tmp_file_path).unlink()
+            except:
+                pass
 
     except HTTPException:
         raise
@@ -939,57 +856,31 @@ def set_log_level_endpoint(request: LogLevelRequest):
 def delete_item(item_id: int):
     """
     Delete a wardrobe item completely:
-    1. Remove the image file from disk
-    2. Delete the row from metadata.csv
-    3. Remove embeddings from .npy files (stub)
+    1. Delete from PostgreSQL (embeddings deleted via CASCADE)
+    2. Delete image from storage (MinIO/R2)
     """
-    metadata_path = Path("../wardrobe-app/public/metadata.csv")
-    wardrobe_dir = Path("../wardrobe-app/public/wardrobe")
-
-    if not metadata_path.exists():
-        raise HTTPException(status_code=500, detail="Metadata file not found")
-
     try:
-        # Read CSV to find the image path and remove the row
-        rows = []
-        image_path = None
-        item_found = False
+        # Delete from database (returns image URL)
+        success, image_url = db.delete_clothing_item(item_id)
 
-        with open(metadata_path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            headers = reader.fieldnames
-
-            if not headers:
-                raise HTTPException(status_code=400, detail="Metadata.csv is empty or invalid")
-
-            for row in reader:
-                if int(row['id']) == item_id:
-                    item_found = True
-                    image_path = row['image_path']
-                    # Don't add this row to the list (effectively deleting it)
-                else:
-                    rows.append(row)
-
-        if not item_found:
+        if not success:
             raise HTTPException(status_code=404, detail=f"Item {item_id} not found")
 
-        # Delete the image file from disk
-        if image_path:
-            file_to_delete = wardrobe_dir / image_path
-            if file_to_delete.exists():
-                file_to_delete.unlink()
-                log_debug(f"Deleted image file: {file_to_delete}")
-            else:
-                log_warning(f"Image file not found at {file_to_delete}")
+        # Delete from storage if we have an image URL
+        if image_url:
+            try:
+                storage_client = get_storage_client()
+                # Extract object key from URL
+                # URL format: http://minio:9000/bucket/path or https://r2.../path
+                object_key = image_url.split('/')[-1]  # Simplified extraction
+                if '/' in image_url.split(storage_client.bucket)[-1]:
+                    object_key = image_url.split(storage_client.bucket + '/')[-1]
 
-        # Delete embeddings (stub for now)
-        delete_embeddings(item_id)
-
-        # Write updated CSV back (without the deleted row)
-        with open(metadata_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=headers)
-            writer.writeheader()
-            writer.writerows(rows)
+                storage_client.delete_file(object_key)
+                log_debug(f"Deleted image from storage: {object_key}")
+            except Exception as e:
+                log_warning(f"Failed to delete image from storage: {e}")
+                # Continue even if storage deletion fails
 
         log_info(f"Item {item_id} deleted successfully")
 
@@ -1003,7 +894,7 @@ def delete_item(item_id: int):
         raise
     except Exception as e:
         log_error(f"Error deleting item", exception=e)
-        raise HTTPException(status_code=500, detail=f"Error deleting item: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
